@@ -767,3 +767,341 @@ class _LogSpan:
     def __exit__(self, *args: Any) -> None:
         elapsed = round((time.monotonic() - self._t0) * 1000, 2)
         logger.debug("[span:end] service=%s operation=%s elapsed_ms=%s", self._service, self._name, elapsed)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXPERT v1.2.0: ROYALTY RECONCILIATION ENGINE
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class ReconciliationItem:
+    """A single entry from a DSP statement matched against expected royalty."""
+    entry_id: str
+    platform: str
+    track_id: str
+    reported_streams: int
+    reported_amount: float
+    expected_amount: float       # based on benchmark typical rate
+    discrepancy: float           # reported - expected
+    discrepancy_pct: float
+    status: str                  # "matched", "underpaid", "overpaid", "missing"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "entry_id": self.entry_id,
+            "platform": self.platform,
+            "track_id": self.track_id,
+            "reported_streams": self.reported_streams,
+            "reported_amount": round(self.reported_amount, 4),
+            "expected_amount": round(self.expected_amount, 4),
+            "discrepancy": round(self.discrepancy, 4),
+            "discrepancy_pct": round(self.discrepancy_pct, 3),
+            "status": self.status,
+        }
+
+
+@dataclass
+class ReconciliationReport:
+    """Summary of a royalty reconciliation run."""
+    creator_id: str
+    period: str
+    total_reported: float
+    total_expected: float
+    net_discrepancy: float
+    items: List[ReconciliationItem]
+    generated_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+
+    def summary(self) -> Dict[str, Any]:
+        underpaid = [i for i in self.items if i.status == "underpaid"]
+        overpaid = [i for i in self.items if i.status == "overpaid"]
+        missing = [i for i in self.items if i.status == "missing"]
+        return {
+            "creator_id": self.creator_id,
+            "period": self.period,
+            "total_reported": round(self.total_reported, 4),
+            "total_expected": round(self.total_expected, 4),
+            "net_discrepancy": round(self.net_discrepancy, 4),
+            "underpaid_count": len(underpaid),
+            "underpaid_total": round(sum(abs(i.discrepancy) for i in underpaid), 4),
+            "overpaid_count": len(overpaid),
+            "missing_count": len(missing),
+        }
+
+
+class RoyaltyReconciliationEngine:
+    """
+    Reconcile DSP royalty statements against expected earnings.
+
+    Compares each RoyaltyEntry's actual payment against the expected amount
+    derived from platform benchmark rates. Classifies discrepancies as
+    underpaid, overpaid, or matched. Produces a structured reconciliation
+    report and Markdown dispute letter template.
+
+    Usage::
+
+        engine = RoyaltyReconciliationEngine(tolerance_pct=0.05)
+        report = engine.reconcile(entries, creator_id="creator-001", period="2026-Q1")
+        print(engine.to_markdown(report))
+    """
+
+    def __init__(self, tolerance_pct: float = 0.05) -> None:
+        """
+        Args:
+            tolerance_pct: Fractional tolerance before flagging a discrepancy.
+                           0.05 = entries within ±5% are considered 'matched'.
+        """
+        self.tolerance_pct = tolerance_pct
+
+    def reconcile(
+        self,
+        entries: List[RoyaltyEntry],
+        creator_id: str,
+        period: str,
+    ) -> ReconciliationReport:
+        """Run reconciliation over a list of royalty entries."""
+        items: List[ReconciliationItem] = []
+        total_reported = 0.0
+        total_expected = 0.0
+
+        for entry in entries:
+            platform_key = entry.platform.value
+            rates = _PLATFORM_BENCHMARK_RATES.get(platform_key, _PLATFORM_BENCHMARK_RATES["custom"])
+            expected = rates["typical"] * entry.streams
+            reported = entry.royalty_amount
+            total_reported += reported
+            total_expected += expected
+
+            if expected == 0:
+                status = "missing" if reported == 0 else "matched"
+                disc_pct = 0.0
+            else:
+                disc_pct = (reported - expected) / expected
+                if abs(disc_pct) <= self.tolerance_pct:
+                    status = "matched"
+                elif disc_pct < 0:
+                    status = "underpaid"
+                else:
+                    status = "overpaid"
+
+            items.append(ReconciliationItem(
+                entry_id=entry.entry_id,
+                platform=platform_key,
+                track_id=entry.track_id,
+                reported_streams=entry.streams,
+                reported_amount=reported,
+                expected_amount=expected,
+                discrepancy=reported - expected,
+                discrepancy_pct=disc_pct,
+                status=status,
+            ))
+
+        return ReconciliationReport(
+            creator_id=creator_id,
+            period=period,
+            total_reported=total_reported,
+            total_expected=total_expected,
+            net_discrepancy=total_reported - total_expected,
+            items=items,
+        )
+
+    def dispute_entries(self, report: ReconciliationReport) -> List[ReconciliationItem]:
+        """Return only underpaid entries for dispute filing."""
+        return [i for i in report.items if i.status == "underpaid"]
+
+    def to_markdown(self, report: ReconciliationReport) -> str:
+        """Render a full Markdown reconciliation report with dispute letter template."""
+        s = report.summary()
+        lines = [
+            f"# Royalty Reconciliation Report — {report.creator_id}",
+            f"**Period**: {report.period}  |  **Generated**: {report.generated_at}",
+            "",
+            "## Summary",
+            "",
+            f"| Metric | Value |",
+            f"|--------|-------|",
+            f"| Total Reported | ${s['total_reported']:.4f} |",
+            f"| Total Expected | ${s['total_expected']:.4f} |",
+            f"| Net Discrepancy | ${s['net_discrepancy']:+.4f} |",
+            f"| Underpaid Entries | {s['underpaid_count']} (${s['underpaid_total']:.4f}) |",
+            f"| Overpaid Entries | {s['overpaid_count']} |",
+            f"| Missing Entries | {s['missing_count']} |",
+            "",
+            "## Entry Detail",
+            "",
+            "| Entry | Platform | Streams | Reported | Expected | Discrepancy | Status |",
+            "|-------|----------|---------|----------|----------|-------------|--------|",
+        ]
+        for item in sorted(report.items, key=lambda x: x.discrepancy):
+            lines.append(
+                f"| {item.entry_id} | {item.platform} | {item.reported_streams:,} | "
+                f"${item.reported_amount:.4f} | ${item.expected_amount:.4f} | "
+                f"${item.discrepancy:+.4f} | {item.status.upper()} |"
+            )
+        if s["underpaid_count"] > 0:
+            lines += [
+                "",
+                "## Dispute Letter Template",
+                "",
+                f"To: {report.items[0].platform if report.items else 'DSP'} Royalty Disputes Team  ",
+                f"From: {report.creator_id}  ",
+                f"Re: Royalty Underpayment Dispute — {report.period}  ",
+                "",
+                f"We have identified {s['underpaid_count']} entries totalling ${s['underpaid_total']:.4f} "
+                f"where reported royalties fall below the published per-stream rate for your platform. "
+                f"Please review the attached reconciliation report and remit the outstanding balance "
+                f"within 30 days. Entry IDs in dispute: "
+                + ", ".join(i.entry_id for i in self.dispute_entries(report)[:10]) + ".",
+            ]
+        return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXPERT v1.2.0: CREATOR EARNINGS FORECASTER
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class EarningsForecast:
+    """Projected earnings for a creator over a future horizon."""
+    creator_id: str
+    historical_periods: int
+    historical_total: float
+    avg_per_period: float
+    trend_pct_per_period: float   # growth or decline rate
+    forecast_periods: int
+    forecast_values: List[float]  # per-period projection
+    forecast_total: float
+    confidence: str               # "high", "medium", "low"
+    lower_bound: float
+    upper_bound: float
+    generated_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+
+    def summary(self) -> Dict[str, Any]:
+        return {
+            "creator_id": self.creator_id,
+            "historical_periods": self.historical_periods,
+            "avg_per_period": round(self.avg_per_period, 4),
+            "trend_pct_per_period": round(self.trend_pct_per_period * 100, 2),
+            "forecast_periods": self.forecast_periods,
+            "forecast_total": round(self.forecast_total, 4),
+            "lower_bound": round(self.lower_bound, 4),
+            "upper_bound": round(self.upper_bound, 4),
+            "confidence": self.confidence,
+        }
+
+
+class CreatorEarningsForecaster:
+    """
+    Project future royalty earnings using linear trend extrapolation.
+
+    Computes a per-period growth rate from historical RoyaltyReports and
+    extrapolates N periods forward with uncertainty bounds. Confidence is
+    downgraded when historical data is sparse or highly volatile.
+
+    Usage::
+
+        forecaster = CreatorEarningsForecaster()
+        forecast = forecaster.forecast(
+            creator_id="creator-001",
+            historical_reports=reports,   # list of RoyaltyReport, chronological
+            periods=4,                    # e.g. 4 quarters ahead
+        )
+        print(forecast.summary())
+        print(forecaster.to_markdown(forecast))
+    """
+
+    def forecast(
+        self,
+        creator_id: str,
+        historical_reports: List[RoyaltyReport],
+        periods: int = 4,
+    ) -> EarningsForecast:
+        """
+        Generate an earnings forecast from a chronological list of RoyaltyReports.
+
+        Args:
+            creator_id: Identifier for logging.
+            historical_reports: Chronologically ordered RoyaltyReport list (oldest first).
+            periods: Number of future periods to forecast.
+        """
+        import statistics
+
+        earnings = [r.total_royalties for r in historical_reports]
+        n = len(earnings)
+        if n == 0:
+            return EarningsForecast(
+                creator_id=creator_id, historical_periods=0,
+                historical_total=0.0, avg_per_period=0.0,
+                trend_pct_per_period=0.0, forecast_periods=periods,
+                forecast_values=[0.0] * periods, forecast_total=0.0,
+                confidence="low", lower_bound=0.0, upper_bound=0.0,
+            )
+
+        avg = sum(earnings) / n
+        total = sum(earnings)
+
+        # Compute trend as mean growth rate between consecutive periods
+        growth_rates: List[float] = []
+        for i in range(1, n):
+            if earnings[i - 1] > 0:
+                growth_rates.append((earnings[i] - earnings[i - 1]) / earnings[i - 1])
+
+        trend = sum(growth_rates) / len(growth_rates) if growth_rates else 0.0
+        volatility = statistics.stdev(growth_rates) if len(growth_rates) >= 2 else 0.0
+
+        # Project forward
+        last = earnings[-1] if earnings else avg
+        forecast_values: List[float] = []
+        for _ in range(periods):
+            last = last * (1 + trend)
+            forecast_values.append(max(0.0, last))
+        forecast_total = sum(forecast_values)
+
+        # Uncertainty: ±2 std deviations applied to forecast total
+        uncertainty = forecast_total * volatility * 2
+        lower = max(0.0, forecast_total - uncertainty)
+        upper = forecast_total + uncertainty
+
+        if n >= 6 and volatility < 0.2:
+            confidence = "high"
+        elif n >= 3 and volatility < 0.5:
+            confidence = "medium"
+        else:
+            confidence = "low"
+
+        return EarningsForecast(
+            creator_id=creator_id,
+            historical_periods=n,
+            historical_total=round(total, 4),
+            avg_per_period=round(avg, 4),
+            trend_pct_per_period=round(trend, 6),
+            forecast_periods=periods,
+            forecast_values=[round(v, 4) for v in forecast_values],
+            forecast_total=round(forecast_total, 4),
+            confidence=confidence,
+            lower_bound=round(lower, 4),
+            upper_bound=round(upper, 4),
+        )
+
+    def to_markdown(self, forecast: EarningsForecast) -> str:
+        """Render a Markdown earnings forecast report."""
+        trend_sign = "+" if forecast.trend_pct_per_period >= 0 else ""
+        lines = [
+            f"# Earnings Forecast — {forecast.creator_id}",
+            f"**Historical Periods**: {forecast.historical_periods}  |  "
+            f"**Avg/Period**: ${forecast.avg_per_period:.4f}  |  "
+            f"**Trend**: {trend_sign}{forecast.trend_pct_per_period:.2f}%/period  |  "
+            f"**Confidence**: {forecast.confidence.upper()}",
+            "",
+            "## Projected Earnings",
+            "",
+            "| Period | Projected Earnings |",
+            "|--------|--------------------|",
+        ]
+        for i, val in enumerate(forecast.forecast_values, 1):
+            lines.append(f"| +{i} | ${val:.4f} |")
+        lines += [
+            "",
+            f"**Total Forecast ({forecast.forecast_periods} periods)**: ${forecast.forecast_total:.4f}",
+            f"**90% Range**: ${forecast.lower_bound:.4f} — ${forecast.upper_bound:.4f}",
+        ]
+        return "\n".join(lines)

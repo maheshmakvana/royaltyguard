@@ -5,9 +5,9 @@ with open("README.md", "r", encoding="utf-8") as f:
 
 setup(
     name="royaltyguard",
-    version="1.0.1",
+    version="1.2.0",
     author="",
-    description="Creator royalty tracking and streaming fraud detection — detect bot streams, zero-rate payouts, duplicate claims for indie artists and labels",
+    description="Creator royalty tracking and streaming fraud detection — bot streams, zero-rate payouts, DSP reconciliation, earnings forecasting, fraud pattern library",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/royaltyguard-py/royaltyguard",
@@ -33,6 +33,9 @@ setup(
         "bot streams detection", "spotify royalty audit",
         "creator royalties", "indie artist tools",
         "royalty fraud", "streaming manipulation detection",
-        "music rights management python",
+        "music rights management python", "DSP royalty reconciliation python",
+        "royalty underpayment detection", "streaming earnings forecast python",
+        "royalty statement audit", "music distributor fraud",
+        "creator economy analytics python",
     ],
 )
