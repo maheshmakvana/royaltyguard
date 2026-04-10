@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as f:
 
 setup(
     name="royaltyguard",
-    version="1.0.0",
+    version="1.0.1",
     author="",
     description="Creator royalty tracking and streaming fraud detection — detect bot streams, zero-rate payouts, duplicate claims for indie artists and labels",
     long_description=long_description,

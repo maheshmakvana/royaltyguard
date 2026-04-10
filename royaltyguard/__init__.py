@@ -17,7 +17,10 @@ from royaltyguard.exceptions import (
 from royaltyguard.advanced import (
     AuditLog,
     CancellationToken,
+    FraudPatternMatch,
     PIIScrubber,
+    PlatformRateBenchmarker,
+    RateBenchmarkResult,
     RateLimiter,
     RoyaltyCache,
     RoyaltyDiff,
@@ -26,7 +29,9 @@ from royaltyguard.advanced import (
     RoyaltyProfiler,
     RoyaltyReportExporter,
     RoyaltyRule,
+    RoyaltySpanEmitter,
     RoyaltyValidator,
+    StreamingFraudPatternLibrary,
     abatch_analyze,
     batch_analyze,
     diff_entries,
@@ -34,7 +39,7 @@ from royaltyguard.advanced import (
     stream_entries,
 )
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __all__ = [
     # Core
     "AnomalyDetector",
@@ -49,7 +54,7 @@ __all__ = [
     "DetectionError",
     "ValidationError",
     "ReportError",
-    # Advanced
+    # Advanced — base
     "RoyaltyCache",
     "RoyaltyPipeline",
     "RoyaltyValidator",
@@ -67,4 +72,10 @@ __all__ = [
     "diff_entries",
     "AuditLog",
     "PIIScrubber",
+    # Advanced — expert
+    "PlatformRateBenchmarker",
+    "RateBenchmarkResult",
+    "StreamingFraudPatternLibrary",
+    "FraudPatternMatch",
+    "RoyaltySpanEmitter",
 ]

@@ -412,3 +412,358 @@ class PIIScrubber:
     @classmethod
     def scrub(cls, text: str) -> str:
         return cls._EMAIL.sub("[EMAIL]", text)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXPERT: PLATFORM RATE BENCHMARKER
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Industry-standard per-stream royalty rates (USD) as of 2025-2026
+_PLATFORM_BENCHMARK_RATES: Dict[str, Dict[str, float]] = {
+    "spotify":       {"min": 0.003, "typical": 0.004,  "max": 0.005},
+    "apple_music":   {"min": 0.007, "typical": 0.008,  "max": 0.010},
+    "amazon_music":  {"min": 0.004, "typical": 0.0059, "max": 0.007},
+    "youtube_music": {"min": 0.001, "typical": 0.002,  "max": 0.003},
+    "tidal":         {"min": 0.009, "typical": 0.0125, "max": 0.015},
+    "deezer":        {"min": 0.003, "typical": 0.0064, "max": 0.008},
+    "soundcloud":    {"min": 0.001, "typical": 0.003,  "max": 0.005},
+    "custom":        {"min": 0.001, "typical": 0.005,  "max": 0.020},
+}
+
+
+@dataclass
+class RateBenchmarkResult:
+    """Comparison of a royalty entry's rate vs. industry benchmarks."""
+    entry_id: str
+    platform: str
+    actual_rate: float
+    benchmark_min: float
+    benchmark_typical: float
+    benchmark_max: float
+    status: str      # "above_typical", "at_typical", "below_typical", "below_minimum"
+    underpayment_estimate: float  # estimated missing royalties if below_minimum
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "entry_id": self.entry_id,
+            "platform": self.platform,
+            "actual_rate": round(self.actual_rate, 7),
+            "benchmark_typical": self.benchmark_typical,
+            "status": self.status,
+            "underpayment_estimate": round(self.underpayment_estimate, 4),
+        }
+
+
+class PlatformRateBenchmarker:
+    """
+    Compare per-stream royalty rates against published industry benchmarks.
+
+    Identifies underpaid royalty entries and quantifies estimated underpayment
+    so creators and their legal teams can dispute payouts with DSPs backed by
+    concrete data.
+
+    Usage::
+
+        benchmarker = PlatformRateBenchmarker()
+        results = benchmarker.benchmark_entries(royalty_entries)
+        print(benchmarker.to_markdown(results))
+    """
+
+    def benchmark_entry(self, entry: RoyaltyEntry) -> RateBenchmarkResult:
+        """Benchmark a single royalty entry against platform norms."""
+        platform_key = entry.platform.value
+        rates = _PLATFORM_BENCHMARK_RATES.get(platform_key, _PLATFORM_BENCHMARK_RATES["custom"])
+        actual = entry.rate_per_stream or 0.0
+
+        if actual > rates["typical"]:
+            status = "above_typical"
+        elif actual >= rates["typical"] * 0.95:
+            status = "at_typical"
+        elif actual >= rates["min"]:
+            status = "below_typical"
+        else:
+            status = "below_minimum"
+
+        underpayment = 0.0
+        if actual < rates["min"] and entry.streams > 0:
+            underpayment = (rates["min"] - actual) * entry.streams
+
+        return RateBenchmarkResult(
+            entry_id=entry.entry_id,
+            platform=platform_key,
+            actual_rate=actual,
+            benchmark_min=rates["min"],
+            benchmark_typical=rates["typical"],
+            benchmark_max=rates["max"],
+            status=status,
+            underpayment_estimate=underpayment,
+        )
+
+    def benchmark_entries(self, entries: List[RoyaltyEntry]) -> List[RateBenchmarkResult]:
+        """Benchmark all entries; sorted by underpayment_estimate descending."""
+        results = [self.benchmark_entry(e) for e in entries]
+        return sorted(results, key=lambda x: x.underpayment_estimate, reverse=True)
+
+    def underpaid_entries(self, entries: List[RoyaltyEntry]) -> List[RateBenchmarkResult]:
+        """Return only entries where actual rate is below the platform minimum."""
+        return [r for r in self.benchmark_entries(entries) if r.status == "below_minimum"]
+
+    def total_underpayment(self, entries: List[RoyaltyEntry]) -> float:
+        """Sum of estimated underpayments across all entries."""
+        return sum(r.underpayment_estimate for r in self.benchmark_entries(entries))
+
+    def to_markdown(self, results: List[RateBenchmarkResult]) -> str:
+        """Render a Markdown benchmarking report table."""
+        lines = ["# Royalty Rate Benchmark Report", "",
+                 "| Entry ID | Platform | Actual Rate | Typical Rate | Status | Underpayment Est. |",
+                 "|----------|----------|------------|--------------|--------|-------------------|"]
+        for r in results:
+            lines.append(
+                f"| {r.entry_id} | {r.platform} | ${r.actual_rate:.6f} | "
+                f"${r.benchmark_typical:.6f} | {r.status.replace('_', ' ').upper()} | "
+                f"${r.underpayment_estimate:.4f} |"
+            )
+        return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXPERT: STREAMING FRAUD PATTERN LIBRARY
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class FraudPatternMatch:
+    """Result of matching royalty entries against a known fraud pattern."""
+    pattern_id: str
+    pattern_name: str
+    matched_entries: List[str]     # entry_ids
+    confidence: float
+    estimated_fraudulent_streams: int
+    estimated_fraud_amount: float
+    description: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "pattern_id": self.pattern_id,
+            "pattern_name": self.pattern_name,
+            "matched_entry_count": len(self.matched_entries),
+            "confidence": round(self.confidence, 3),
+            "estimated_fraudulent_streams": self.estimated_fraudulent_streams,
+            "estimated_fraud_amount": round(self.estimated_fraud_amount, 4),
+            "description": self.description,
+        }
+
+
+class StreamingFraudPatternLibrary:
+    """
+    Library of known streaming fraud patterns applied as heuristic detectors.
+
+    Each pattern uses purely structural signals from RoyaltyEntry objects —
+    no ML required. Patterns are based on documented DSP fraud investigation
+    reports and music industry body (IFPI) guidelines.
+
+    Usage::
+
+        library = StreamingFraudPatternLibrary()
+        matches = library.scan(entries)
+        for match in matches:
+            print(match.pattern_name, match.estimated_fraud_amount)
+    """
+
+    def scan(self, entries: List[RoyaltyEntry]) -> List[FraudPatternMatch]:
+        """Run all patterns against the entry list; return non-empty matches."""
+        patterns = [
+            self._detect_round_number_streams,
+            self._detect_rate_collapse,
+            self._detect_territory_concentration,
+            self._detect_burst_streaming,
+            self._detect_zero_rate_entries,
+        ]
+        matches = []
+        for detector in patterns:
+            result = detector(entries)
+            if result and result.matched_entries:
+                matches.append(result)
+        return sorted(matches, key=lambda x: x.estimated_fraud_amount, reverse=True)
+
+    def _detect_round_number_streams(self, entries: List[RoyaltyEntry]) -> FraudPatternMatch:
+        """Bot streams often produce suspiciously round stream counts."""
+        matched = [e for e in entries if e.streams > 0 and e.streams % 1000 == 0]
+        fraud_streams = sum(e.streams for e in matched)
+        fraud_amount = sum((e.rate_per_stream or 0) * e.streams for e in matched)
+        return FraudPatternMatch(
+            pattern_id="SFP-001",
+            pattern_name="Round-Number Stream Counts",
+            matched_entries=[e.entry_id for e in matched],
+            confidence=0.55 if matched else 0.0,
+            estimated_fraudulent_streams=fraud_streams,
+            estimated_fraud_amount=fraud_amount,
+            description="Entries with stream counts that are exact multiples of 1,000 — a common signature of bot-generated traffic.",
+        )
+
+    def _detect_rate_collapse(self, entries: List[RoyaltyEntry]) -> FraudPatternMatch:
+        """Royalty siphoning: rate per stream is ≥50% below the platform minimum."""
+        matched = []
+        for e in entries:
+            benchmark = _PLATFORM_BENCHMARK_RATES.get(e.platform.value, _PLATFORM_BENCHMARK_RATES["custom"])
+            actual = e.rate_per_stream or 0.0
+            if actual > 0 and actual < benchmark["min"] * 0.5:
+                matched.append(e)
+        fraud_amount = sum(
+            (_PLATFORM_BENCHMARK_RATES.get(e.platform.value, _PLATFORM_BENCHMARK_RATES["custom"])["min"] - (e.rate_per_stream or 0)) * e.streams
+            for e in matched
+        )
+        return FraudPatternMatch(
+            pattern_id="SFP-002",
+            pattern_name="Royalty Rate Collapse",
+            matched_entries=[e.entry_id for e in matched],
+            confidence=0.80 if matched else 0.0,
+            estimated_fraudulent_streams=0,
+            estimated_fraud_amount=max(0.0, fraud_amount),
+            description="Entries where the per-stream rate is >50% below the known platform minimum — indicative of royalty siphoning or metadata fraud.",
+        )
+
+    def _detect_territory_concentration(self, entries: List[RoyaltyEntry]) -> FraudPatternMatch:
+        """Click-farm signal: >90% of streams from a single non-global territory."""
+        territory_counts: Dict[str, int] = {}
+        for e in entries:
+            if e.territory != "GLOBAL":
+                territory_counts[e.territory] = territory_counts.get(e.territory, 0) + e.streams
+        total = sum(e.streams for e in entries)
+        matched = []
+        if total > 0:
+            for territory, count in territory_counts.items():
+                if count / total > 0.90:
+                    matched = [e for e in entries if e.territory == territory]
+                    break
+        return FraudPatternMatch(
+            pattern_id="SFP-003",
+            pattern_name="Territory Concentration",
+            matched_entries=[e.entry_id for e in matched],
+            confidence=0.65 if matched else 0.0,
+            estimated_fraudulent_streams=sum(e.streams for e in matched),
+            estimated_fraud_amount=sum((e.rate_per_stream or 0) * e.streams for e in matched) * 0.5,
+            description="More than 90% of all streams concentrated in a single non-global territory — typical of click-farm operations.",
+        )
+
+    def _detect_burst_streaming(self, entries: List[RoyaltyEntry]) -> FraudPatternMatch:
+        """Burst anomaly: a single period has streams > 10× the average across all periods."""
+        if len(entries) < 3:
+            return FraudPatternMatch("SFP-004", "Burst Streaming", [], 0.0, 0, 0.0, "")
+        stream_counts = [e.streams for e in entries]
+        avg = sum(stream_counts) / len(stream_counts)
+        matched = [e for e in entries if avg > 0 and e.streams > avg * 10]
+        return FraudPatternMatch(
+            pattern_id="SFP-004",
+            pattern_name="Burst Streaming Anomaly",
+            matched_entries=[e.entry_id for e in matched],
+            confidence=0.70 if matched else 0.0,
+            estimated_fraudulent_streams=sum(max(0, e.streams - int(avg * 3)) for e in matched),
+            estimated_fraud_amount=sum((e.rate_per_stream or 0) * max(0, e.streams - int(avg * 3)) for e in matched),
+            description="One or more periods with stream counts exceeding 10× the average — a strong signal of artificial stream injection.",
+        )
+
+    def _detect_zero_rate_entries(self, entries: List[RoyaltyEntry]) -> FraudPatternMatch:
+        """Zero-rate entries: streams > 0 but royalty_amount == 0."""
+        matched = [e for e in entries if e.streams > 0 and e.royalty_amount == 0]
+        return FraudPatternMatch(
+            pattern_id="SFP-005",
+            pattern_name="Zero-Rate Payout Entries",
+            matched_entries=[e.entry_id for e in matched],
+            confidence=0.90 if matched else 0.0,
+            estimated_fraudulent_streams=sum(e.streams for e in matched),
+            estimated_fraud_amount=sum(
+                _PLATFORM_BENCHMARK_RATES.get(e.platform.value, _PLATFORM_BENCHMARK_RATES["custom"])["min"] * e.streams
+                for e in matched
+            ),
+            description="Entries with non-zero stream counts but zero royalty payout — potential metadata fraud or distributor siphoning.",
+        )
+
+    def to_markdown(self, matches: List[FraudPatternMatch]) -> str:
+        """Render a Markdown fraud pattern scan summary."""
+        lines = ["# Streaming Fraud Pattern Scan", "",
+                 "| Pattern | Matches | Confidence | Est. Fraud Amount |",
+                 "|---------|---------|------------|-------------------|"]
+        for m in matches:
+            lines.append(
+                f"| {m.pattern_name} | {len(m.matched_entries)} | "
+                f"{m.confidence:.0%} | ${m.estimated_fraud_amount:.4f} |"
+            )
+        if not matches:
+            lines.append("| _No patterns matched_ | — | — | — |")
+        return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXPERT: ROYALTY SPAN EMITTER (OpenTelemetry with stdlib fallback)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class RoyaltySpanEmitter:
+    """
+    Emit OpenTelemetry spans for royalty analysis operations.
+    Falls back to structured logging when opentelemetry-sdk is not installed.
+    """
+
+    def __init__(self, service_name: str = "royaltyguard") -> None:
+        self._service = service_name
+        self._otel_available = False
+        self._tracer: Any = None
+        try:
+            from opentelemetry import trace
+            from opentelemetry.sdk.trace import TracerProvider
+            provider = TracerProvider()
+            trace.set_tracer_provider(provider)
+            self._tracer = trace.get_tracer(service_name)
+            self._otel_available = True
+            logger.debug("RoyaltySpanEmitter: OpenTelemetry tracer initialised")
+        except ImportError:
+            logger.debug("RoyaltySpanEmitter: opentelemetry not installed — using log fallback")
+
+    def span(self, operation: str, attributes: Optional[Dict[str, Any]] = None) -> Any:
+        """Context manager: emit an OTEL span or log span start/end."""
+        if self._otel_available and self._tracer is not None:
+            span = self._tracer.start_span(operation)
+            if attributes:
+                for k, v in attributes.items():
+                    span.set_attribute(k, str(v))
+            return span
+        return _LogSpan(operation, attributes or {}, self._service)
+
+    def emit_anomaly(self, anomaly: StreamAnomaly) -> None:
+        """Emit a span for a detected stream anomaly."""
+        attrs = {
+            "anomaly_id": anomaly.anomaly_id,
+            "creator_id": anomaly.creator_id,
+            "fraud_type": anomaly.fraud_type.value,
+            "confidence": anomaly.confidence,
+            "estimated_fraud_amount": anomaly.estimated_fraud_amount,
+        }
+        with self.span("royaltyguard.anomaly_detected", attrs):
+            pass
+
+    def emit_report(self, report: RoyaltyReport) -> None:
+        """Emit a span summarising a royalty report."""
+        attrs = {
+            "creator_id": report.creator_id,
+            "entry_count": len(report.entries),
+            "anomaly_count": len(report.anomalies),
+        }
+        with self.span("royaltyguard.report_generated", attrs):
+            pass
+
+
+class _LogSpan:
+    """Stdlib-logging fallback span used when OTEL is unavailable."""
+
+    def __init__(self, name: str, attrs: Dict[str, Any], service: str) -> None:
+        self._name = name
+        self._attrs = attrs
+        self._service = service
+        self._t0 = time.monotonic()
+
+    def __enter__(self) -> "_LogSpan":
+        logger.debug("[span:start] service=%s operation=%s attrs=%s", self._service, self._name, self._attrs)
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        elapsed = round((time.monotonic() - self._t0) * 1000, 2)
+        logger.debug("[span:end] service=%s operation=%s elapsed_ms=%s", self._service, self._name, elapsed)
