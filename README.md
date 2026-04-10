@@ -183,6 +183,9 @@ for line in entries_to_ndjson(all_entries):
 
 ## Changelog
 
+### v1.2.2 (2026-04-10)
+- Added Contributing and Author sections to README
+
 ### v1.2.1 (2026-04-10)
 - Added Changelog section to README for release traceability
 
