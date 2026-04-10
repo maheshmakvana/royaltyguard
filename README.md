@@ -181,6 +181,22 @@ for line in entries_to_ndjson(all_entries):
     output.write(line)
 ```
 
+## Changelog
+
+### v1.2.1 (2026-04-10)
+- Added Changelog section to README for release traceability
+
+### v1.2.0
+- Added `RoyaltyReconciliationEngine` — reconcile streaming payouts against distributor statements
+- Added `CreatorEarningsForecaster` — forecast creator earnings from streaming trend data
+- Expanded SEO keywords for PyPI discoverability
+
+### v1.0.1
+- Advanced features: pipeline, caching, validation, diff/trend, streaming, audit log
+
+### v1.0.0
+- Initial release: streaming fraud detection, bot stream detection, royalty siphoning, payout anomalies
+
 ## License
 
 MIT
